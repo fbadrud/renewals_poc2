@@ -212,6 +212,7 @@ Available agents:
 1. QuoteBuilderAgent → returns all renewal quotes
 2. GapDetectionAgent → returns all records with gaps (e.g., missing notes, no contact)
 3. DataPrepAgent → returns raw cleaned renewal data
+4. UpcomingRenewalsAgent → returns customers with renewals due in the next 30 days
 
 Respond ONLY with a valid JSON like this:
 {{
@@ -254,9 +255,58 @@ If no agent applies, say:
             r = requests.get("https://renewal-agents-fn.azurewebsites.net/api/dataprep?code=jR4hRdZItpRdIbtBJKDJ4iOZmbX7Aq_L3SuzRr5jjPt1AzFuSGlRqQ==")
             return func.HttpResponse(f"{final_answer}\n\n{r.text}")
 
+        elif agent == "UpcomingRenewalsAgent":
+            r = requests.get("https://renewal-agents-fn.azurewebsites.net/api/UpcomingRenewalsAgent")
+            return func.HttpResponse(f"{final_answer}\n\n{r.text}")
+
+
         else:
             return func.HttpResponse(final_answer, status_code=200)
 
     except Exception as e:
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)
 
+import datetime
+import json
+from azure.storage.blob import BlobServiceClient
+
+@app.function_name(name="UpcomingRenewalsAgent")
+@app.route(route="UpcomingRenewalsAgent", auth_level=func.AuthLevel.ANONYMOUS)
+def upcoming_renewals_agent(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("UpcomingRenewalsAgent triggered")
+
+    try:
+        # Load environment config
+        blob_connection_str = os.environ["BLOB_CONNECTION_STRING"]
+        container_name = os.environ["BLOB_CONTAINER_NAME"]
+        blob_name = os.environ["BLOB_NAME"]
+
+        # Read the blob content
+        blob_service_client = BlobServiceClient.from_connection_string(blob_connection_str)
+        blob_client = blob_service_client.get_container_client(container_name).get_blob_client(blob_name)
+        blob_data = blob_client.download_blob().readall()
+        records = json.loads(blob_data)
+
+        # Calculate threshold date
+        today = datetime.date.today()
+        threshold = today + datetime.timedelta(days=30)
+
+        # Filter records with expirationDate within next 30 days
+        upcoming = []
+        for r in records:
+            try:
+                exp_date = datetime.datetime.strptime(r["expirationDate"], "%Y-%m-%d").date()
+                if today <= exp_date <= threshold:
+                    upcoming.append(r)
+            except Exception as e:
+                logging.warning(f"Skipping record due to date error: {e}")
+
+        return func.HttpResponse(
+            body=json.dumps(upcoming, indent=2),
+            status_code=200,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logging.error(f"Error in UpcomingRenewalsAgent: {e}")
+        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
